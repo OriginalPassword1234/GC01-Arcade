@@ -1,0 +1,97 @@
+name: GC-01 Arcade - Compile Only
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download Rad Pro 3.1.1 and add arcade code
+        run: |
+          set -euo pipefail
+
+          echo "f33336291af935b0bc37629d3594b17dc9d31252c346c489757e63ae2a4b6c70  GC01_Arcade_Code_43KB.zip" | sha256sum -c -
+
+          curl -fL --retry 3 \
+            https://github.com/Gissio/radpro/archive/refs/tags/3.1.1.zip \
+            -o original.zip
+
+          unzip -q original.zip
+
+          unzip -qo GC01_Arcade_Code_43KB.zip \
+            -d radpro-3.1.1
+
+          test -f radpro-3.1.1/platform.io/src/ui/arcade.c
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install 'platformio>=6.1,<7' \
+            -r radpro-3.1.1/tools/requirements.txt
+
+      - name: Compile APM32 firmware
+        run: |
+          mkdir -p results
+
+          cd radpro-3.1.1/platform.io
+
+          pio run -e fnirsi-gc01_apm32f103rb-en \
+            2>&1 | tee ../../results/build.log
+
+      - name: Check firmware size
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path(
+              "radpro-3.1.1/platform.io/.pio/build/"
+              "fnirsi-gc01_apm32f103rb-en/firmware.bin"
+          )
+
+          size = p.stat().st_size
+          limit = 57340
+
+          print("Firmware size:", size)
+          print("Maximum size:", limit)
+
+          if size > limit:
+              raise SystemExit("ERROR: Firmware too large!")
+
+          print("Size check passed.")
+          PY
+
+      - name: Save build results
+        if: always()
+        run: |
+          mkdir -p results
+          DIR=radpro-3.1.1/platform.io/.pio/build/fnirsi-gc01_apm32f103rb-en
+
+          for f in firmware.bin firmware.elf firmware.map; do
+            if [ -f "$DIR/$f" ]; then
+              cp "$DIR/$f" results/
+            fi
+          done
+
+          echo "UNVERIFIED BUILD - DO NOT FLASH" \
+            > results/DO_NOT_FLASH.txt
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: GC01-UNVERIFIED-DO-NOT-FLASH
+          path: results/
