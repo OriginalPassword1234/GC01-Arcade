@@ -1,4 +1,4 @@
-name: GC-01 Arcade - Compile Only
+name: GC-01 Arcade V3 - test and compile ONLY (DO NOT FLASH)
 
 on:
   workflow_dispatch:
@@ -7,77 +7,100 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  gc01-v3-apm32:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
     steps:
-      - name: Checkout repository
+      - name: Checkout source overlay
         uses: actions/checkout@v4
 
-      - name: Download Rad Pro 3.1.1 and add arcade code
+      - name: Verify V3 overlay and retrieve exact Rad Pro 3.1.1
+        shell: bash
         run: |
           set -euo pipefail
 
-          echo "f33336291af935b0bc37629d3594b17dc9d31252c346c489757e63ae2a4b6c70  GC01_Arcade_Code_43KB.zip" | sha256sum -c -
+          echo '52841c2a4ccfcec56ad36f9d2cad56e4e4c6a4aaed316695196d45636da9e23e  GC01_Arcade_V3.zip' | sha256sum -c -
 
-          curl -fL --retry 3 \
-            https://github.com/Gissio/radpro/archive/refs/tags/3.1.1.zip \
-            -o original.zip
+          curl --fail --location --retry 3 \
+            'https://github.com/Gissio/radpro/archive/refs/tags/3.1.1.zip' \
+            --output /tmp/radpro-3.1.1.zip
 
-          unzip -q original.zip
+          mkdir -p stock results
+          unzip -q /tmp/radpro-3.1.1.zip -d stock
+          cp -a stock/radpro-3.1.1 radpro-3.1.1
 
-          unzip -qo GC01_Arcade_Code_43KB.zip \
-            -d radpro-3.1.1
+          unzip -qo GC01_Arcade_V3.zip -d radpro-3.1.1
 
           test -f radpro-3.1.1/platform.io/src/ui/arcade.c
+          test -f radpro-3.1.1/arcade-tests/test_v3_features.c
+
+      - name: Preservation and game/render/input regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd radpro-3.1.1
+
+          python arcade-tests/verify_preservation.py ../stock/radpro-3.1.1
+
+          ORIGINAL="$PWD/../stock/radpro-3.1.1" ./arcade-tests/compare_legacy.sh
+
+          ./arcade-tests/run.sh
+          ./arcade-tests/run_v3.sh
+          ./arcade-tests/run_graphics.sh
+          ./arcade-tests/run_dirty.sh
 
       - name: Install Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install PlatformIO
+      - name: Install PlatformIO dependencies
+        shell: bash
         run: |
           python -m pip install --upgrade pip
           python -m pip install 'platformio>=6.1,<7' \
             -r radpro-3.1.1/tools/requirements.txt
 
-      - name: Compile APM32 firmware
+      - name: Complete APM32 English firmware build
+        shell: bash
         run: |
+          set -euo pipefail
           mkdir -p results
 
-          cd radpro-3.1.1/platform.io
+          (cd radpro-3.1.1/platform.io && pio run -e fnirsi-gc01_apm32f103rb-en) \
+            2>&1 | tee results/build.log
 
-          pio run -e fnirsi-gc01_apm32f103rb-en \
-            2>&1 | tee ../../results/build.log
-
-      - name: Check firmware size
+      - name: Reject oversized firmware
+        shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
 
-          p = Path(
-              "radpro-3.1.1/platform.io/.pio/build/"
-              "fnirsi-gc01_apm32f103rb-en/firmware.bin"
+          path = Path(
+              'radpro-3.1.1/platform.io/.pio/build/'
+              'fnirsi-gc01_apm32f103rb-en/firmware.bin'
           )
 
-          size = p.stat().st_size
-          limit = 57340
+          size = path.stat().st_size
+          remaining = 57340 - size
 
-          print("Firmware size:", size)
-          print("Maximum size:", limit)
+          print(f'Firmware size: {size} bytes')
+          print(f'Maximum payload: 57340 bytes')
+          print(f'Remaining flash: {remaining} bytes')
 
-          if size > limit:
-              raise SystemExit("ERROR: Firmware too large!")
+          if remaining < 0:
+              raise SystemExit('ERROR: Firmware too large!')
 
-          print("Size check passed.")
+          print('Size check passed.')
           PY
 
       - name: Save build results
         if: always()
+        shell: bash
         run: |
           mkdir -p results
+
           DIR=radpro-3.1.1/platform.io/.pio/build/fnirsi-gc01_apm32f103rb-en
 
           for f in firmware.bin firmware.elf firmware.map; do
@@ -89,9 +112,13 @@ jobs:
           echo "UNVERIFIED BUILD - DO NOT FLASH" \
             > results/DO_NOT_FLASH.txt
 
+          (cd results && sha256sum firmware.bin firmware.elf 2>/dev/null || true) \
+            > results/checksums.txt
+
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: GC01-UNVERIFIED-DO-NOT-FLASH
+          name: GC01-V3-RAW-UNVERIFIED-DO-NOT-FLASH
           path: results/
+          retention-days: 14
