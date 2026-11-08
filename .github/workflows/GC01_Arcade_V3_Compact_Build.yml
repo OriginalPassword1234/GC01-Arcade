@@ -115,3 +115,21 @@ jobs:
           name: GC01-V3-COMPACT-RAW-UNVERIFIED-DO-NOT-FLASH
           path: results/
           retention-days: 14
+      - name: Sign the experimental GC-01 firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          python radpro-3.1.1/tools/sign.py
+          source_file="fnirsi-gc01_apm32f103rb/firmware/radpro-fnirsi-gc01_apm32f103rb-en-3.1.1.bin"
+          output_file="results/radpro-fnirsi-gc01_apm32f103rb-en-3.1.1-arcade-v3-compact-install.bin"
+          test -s "$source_file"
+          cp "$source_file" "$output_file"
+          test "$(wc -c < "$output_file")" -eq 114688
+          echo "cc7ae74e74207808862718961a9fbeb530703050b50fb17eba3c0cc319424e8a  $output_file" | sha256sum -c -
+
+      - name: Upload signed experimental firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: GC01-V3-COMPACT-SIGNED-EXPERIMENTAL
+          path: results/radpro-fnirsi-gc01_apm32f103rb-en-3.1.1-arcade-v3-compact-install.bin
+          retention-days: 14
