@@ -1,4 +1,4 @@
-name: GC-01 Arcade V3 - test and compile ONLY (DO NOT FLASH)
+name: GC-01 Arcade V3 Compact - Test and Compile
 
 on:
   workflow_dispatch:
@@ -12,38 +12,44 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - name: Checkout source overlay
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Verify V3 overlay and retrieve exact Rad Pro 3.1.1
+      - name: Verify source and download Rad Pro 3.1.1
         shell: bash
         run: |
           set -euo pipefail
 
-          echo '52841c2a4ccfcec56ad36f9d2cad56e4e4c6a4aaed316695196d45636da9e23e  GC01_Arcade_V3.zip' | sha256sum -c -
+          echo '9cbca040f31651537403c90578593e717bc17d94ba31095608cc9d6ebf719b84  GC01_Arcade_V3_Compact.zip' | sha256sum -c -
 
           curl --fail --location --retry 3 \
-            'https://github.com/Gissio/radpro/archive/refs/tags/3.1.1.zip' \
+            https://github.com/Gissio/radpro/archive/refs/tags/3.1.1.zip \
             --output /tmp/radpro-3.1.1.zip
 
           mkdir -p stock results
+
           unzip -q /tmp/radpro-3.1.1.zip -d stock
+
           cp -a stock/radpro-3.1.1 radpro-3.1.1
 
-          unzip -qo GC01_Arcade_V3.zip -d radpro-3.1.1
+          unzip -qo GC01_Arcade_V3_Compact.zip \
+            -d radpro-3.1.1
 
           test -f radpro-3.1.1/platform.io/src/ui/arcade.c
           test -f radpro-3.1.1/arcade-tests/test_v3_features.c
 
-      - name: Preservation and game/render/input regression tests
+      - name: Run preservation and regression tests
         shell: bash
         run: |
           set -euo pipefail
+
           cd radpro-3.1.1
 
-          python arcade-tests/verify_preservation.py ../stock/radpro-3.1.1
+          python arcade-tests/verify_preservation.py \
+            ../stock/radpro-3.1.1
 
-          ORIGINAL="$PWD/../stock/radpro-3.1.1" ./arcade-tests/compare_legacy.sh
+          ORIGINAL="$PWD/../stock/radpro-3.1.1" \
+            ./arcade-tests/compare_legacy.sh
 
           ./arcade-tests/run.sh
           ./arcade-tests/run_v3.sh
@@ -55,23 +61,27 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install PlatformIO dependencies
+      - name: Install PlatformIO
         shell: bash
         run: |
           python -m pip install --upgrade pip
+
           python -m pip install 'platformio>=6.1,<7' \
             -r radpro-3.1.1/tools/requirements.txt
 
-      - name: Complete APM32 English firmware build
+      - name: Compile APM32 GC-01 firmware
         shell: bash
         run: |
           set -euo pipefail
+
           mkdir -p results
 
-          (cd radpro-3.1.1/platform.io && pio run -e fnirsi-gc01_apm32f103rb-en) \
-            2>&1 | tee results/build.log
+          (
+            cd radpro-3.1.1/platform.io
+            pio run -e fnirsi-gc01_apm32f103rb-en
+          ) 2>&1 | tee results/build.log
 
-      - name: Reject oversized firmware
+      - name: Verify flash memory capacity
         shell: bash
         run: |
           python - <<'PY'
@@ -83,19 +93,33 @@ jobs:
           )
 
           size = path.stat().st_size
-          remaining = 57340 - size
+          maximum = 57340
+          remaining = maximum - size
 
-          print(f'Firmware size: {size} bytes')
-          print(f'Maximum payload: 57340 bytes')
-          print(f'Remaining flash: {remaining} bytes')
+          print("=" * 45)
+          print("GC-01 ARCADE V3 COMPACT")
+          print("=" * 45)
+
+          print(f"Firmware size: {size:,} bytes")
+          print(f"Maximum size: {maximum:,} bytes")
+          print(f"Remaining flash: {remaining:,} bytes")
 
           if remaining < 0:
-              raise SystemExit('ERROR: Firmware too large!')
+              raise SystemExit(
+                  "FAILED: Firmware exceeds flash limit!"
+              )
 
-          print('Size check passed.')
+          print("PASSED: Firmware fits in flash.")
+
+          if remaining < 1024:
+              print(
+                  "WARNING: Less than 1 KiB of flash remains."
+              )
+
+          print("=" * 45)
           PY
 
-      - name: Save build results
+      - name: Save firmware and diagnostic files
         if: always()
         shell: bash
         run: |
@@ -112,13 +136,15 @@ jobs:
           echo "UNVERIFIED BUILD - DO NOT FLASH" \
             > results/DO_NOT_FLASH.txt
 
-          (cd results && sha256sum firmware.bin firmware.elf 2>/dev/null || true) \
-            > results/checksums.txt
+          (
+            cd results
+            sha256sum firmware.bin firmware.elf 2>/dev/null || true
+          ) > results/checksums.txt
 
-      - name: Upload results
+      - name: Upload compilation results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: GC01-V3-RAW-UNVERIFIED-DO-NOT-FLASH
+          name: GC01-V3-COMPACT-RAW-UNVERIFIED-DO-NOT-FLASH
           path: results/
           retention-days: 14
