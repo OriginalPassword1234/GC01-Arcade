@@ -1,4 +1,4 @@
-name: GC-01 Dungeon Prototype - audited source tests and ARM build ONLY
+name: GC-01 Dungeon Gameplay Upgrade 0.3 - test and compile ONLY
 
 on:
   workflow_dispatch:
@@ -23,7 +23,7 @@ jobs:
         run: |
           set -euo pipefail
           # Updated SHA-256 is filled in when the reviewed source ZIP is packaged.
-          echo '24359aa55a9e373f7d048a7022a05f71a961252b0947001004256fe9d4519709  GC01_Dungeon_Prototype_Source.zip' | sha256sum -c -
+          echo '896916ee69572babb710fc2f87395f7ebabec65ada256064fa4e49854050aa9d  GC01_Dungeon_Prototype_Source.zip' | sha256sum -c -
           python - <<'PYZIP'
           import stat
           from pathlib import PurePosixPath
@@ -35,6 +35,7 @@ jobs:
               'dungeon-tests/test_dungeon.c',
               'dungeon-tests/test_regressions.c',
               'dungeon-tests/test_render.c',
+              'dungeon-tests/test_features.c',
               'dungeon-tests/verify_firmware.py',
               'dungeon-tests/verify_preservation.py',
               'platform.io/platformio.ini',
@@ -68,13 +69,14 @@ jobs:
                       (mode and not stat.S_ISREG(mode)) or
                       item.file_size > 250000):
                       raise SystemExit('FAIL: unsafe ZIP member: ' + item.filename)
-          print('PASS: 22 exact, regular, CRC-checked and path-safe source files')
+          print('PASS: 23 exact, regular, CRC-checked and path-safe source files')
           PYZIP
           curl --fail --location --retry 3 \
             'https://github.com/Gissio/radpro/archive/refs/tags/3.1.1.zip' \
             --output /tmp/radpro-3.1.1.zip
           mkdir -p stock results
           sha256sum /tmp/radpro-3.1.1.zip | tee results/upstream-source-sha256.txt
+          echo 'c998b5bab67c74fe6be2311f94adedbf9a23838c0e040dcc65cf19a87a30cadc  /tmp/radpro-3.1.1.zip' | sha256sum -c -
           unzip -q /tmp/radpro-3.1.1.zip -d stock
           cp -a stock/radpro-3.1.1 radpro-3.1.1
           unzip -qo GC01_Dungeon_Prototype_Source.zip -d radpro-3.1.1
@@ -145,6 +147,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: GC01-DUNGEON-PROTOTYPE-AUDITED-RAW-DO-NOT-FLASH
+          name: GC01-DUNGEON-V03-RAW-UNVERIFIED-DO-NOT-FLASH
           path: results/
           retention-days: 14
