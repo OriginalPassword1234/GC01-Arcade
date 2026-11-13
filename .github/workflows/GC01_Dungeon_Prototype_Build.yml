@@ -1,4 +1,4 @@
-name: GC-01 Parkour Gauntlet 0.4.2 - OPTIMIZE AND COMPILE ONLY
+name: GC-01 Parkour Gauntlet 0.4.2 - build, verify and sign EXPERIMENTAL
 
 on:
   workflow_dispatch:
@@ -160,6 +160,103 @@ jobs:
           python radpro-3.1.1/parkour-tests/verify_firmware.py \
             "$b/firmware.bin" "$b/firmware.elf" 2>&1 | tee results/memory-audit.log
 
+      - name: Sign and independently verify experimental install image
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release results
+          build=radpro-3.1.1/platform.io/.pio/build/fnirsi-gc01_apm32f103rb-en
+          raw="$build/firmware.bin"
+          elf="$build/firmware.elf"
+          test -s "$raw"
+          test -s "$elf"
+          test -s results/memory-audit.log
+          test -s results/build-variant.txt
+          # Only reached after source validation, native tests, build, strict
+          # 57,340-byte limit and ARM ELF/memory checks have succeeded.
+          (cd radpro-3.1.1 && python tools/sign.py) 2>&1 | tee results/sign.log
+          signed=radpro-3.1.1/fnirsi-gc01_apm32f103rb/firmware/radpro-fnirsi-gc01_apm32f103rb-en-3.1.1.bin
+          test -s "$signed"
+          output=release/radpro-fnirsi-gc01_apm32f103rb-en-3.1.1-parkour-v042-EXPERIMENTAL-install.bin
+          cp "$signed" "$output"
+          # Independently verify target, application content, settings metadata,
+          # padding and hardware CRC. Any failure blocks the signed artifact.
+          python - "$raw" "$output" <<'PYVERIFY' | tee results/sign-verification.log
+          import hashlib
+          import struct
+          import sys
+          from pathlib import Path
+
+          raw = Path(sys.argv[1]).read_bytes()
+          signed = Path(sys.argv[2]).read_bytes()
+          APP_START = 0x08004000
+          APP_CRC = 0x08011FFC
+          RAW_LIMIT = APP_CRC - APP_START  # 57,340 bytes
+          FOOTER = 0xDFFC
+          SIGNED_LENGTH = 0x1C000
+
+          if not 40 <= len(raw) <= RAW_LIMIT:
+              raise SystemExit(f'FAIL: invalid raw application size {len(raw)}')
+          if len(signed) != SIGNED_LENGTH:
+              raise SystemExit(f'FAIL: signed file length {len(signed)} != {SIGNED_LENGTH}')
+          stack, reset = struct.unpack_from('<II', raw)
+          if stack != 0x20005000 or not (reset & 1):
+              raise SystemExit('FAIL: unexpected APM32 stack pointer or Thumb reset vector')
+          if not APP_START <= (reset & ~1) < APP_CRC:
+              raise SystemExit('FAIL: reset vector outside GC-01 application')
+          state_base, state_size = struct.unpack_from('<II', signed, 0x20)
+          if (state_base, state_size) != (0x08012000, 0x400):
+              raise SystemExit('FAIL: unexpected GC-01 settings metadata')
+          if signed[:0x20] != raw[:0x20] or signed[0x28:len(raw)] != raw[0x28:]:
+              raise SystemExit('FAIL: signing changed unexpected bytes of compiled application')
+          if signed[len(raw):FOOTER] != b'\xff' * (FOOTER - len(raw)):
+              raise SystemExit('FAIL: non-FF padding inside unused application flash')
+          if signed[0xE000:] != b'\xff' * (len(signed) - 0xE000):
+              raise SystemExit('FAIL: unexpected data after application partition')
+
+          # STM32-style CRC, non-reflected poly 0x04C11DB7, initial 0xFFFFFFFF.
+          crc = 0xFFFFFFFF
+          for offset in range(0, FOOTER, 4):
+              crc ^= struct.unpack_from('<I', signed, offset)[0]
+              for _ in range(32):
+                  crc = ((crc << 1) ^ (0x04C11DB7 if crc & 0x80000000 else 0)) & 0xFFFFFFFF
+          stored_crc = struct.unpack_from('<I', signed, FOOTER)[0]
+          if stored_crc != crc:
+              raise SystemExit(f'FAIL: stored CRC {stored_crc:08x} != calculated CRC {crc:08x}')
+          print(f'PASS: raw application {len(raw)}/{RAW_LIMIT} bytes; headroom {RAW_LIMIT-len(raw)}')
+          print(f'PASS: install image {len(signed)} bytes, CRC 0x{crc:08x}')
+          print('PASS: application payload, vectors, metadata, padding and integrity checks')
+          print('Raw SHA-256:', hashlib.sha256(raw).hexdigest())
+          print('Signed SHA-256:', hashlib.sha256(signed).hexdigest())
+          PYVERIFY
+          (cd release && sha256sum *.bin > CHECKSUMS.sha256)
+          cp results/build-variant.txt release/BUILD_VARIANT.txt
+          cp results/size-comparison.txt release/SIZE_REPORT.txt
+          cat > release/READ_ME_FIRST.txt <<'EOF'
+          GC-01 PARKOUR GAUNTLET 0.4.2 - SIGNED EXPERIMENTAL INSTALL CANDIDATE
+
+          Target: FNIRSI GC-01 APM32F103RB, English, Rad Pro 3.1.1 base.
+          The included file ending in -install.bin has passed source, native
+          game tests, ARM memory layout, firmware payload and CRC checks.
+          BUILD_VARIANT.txt tells you whether FULL or COMPACT art was selected.
+
+          This image is experimental and has NOT been tested on your hardware.
+          Passing software checks does NOT establish radiation readings,
+          alarms, power-management or display correctness. Do NOT rely on
+          this experimental firmware for radiation-safety decisions.
+          Keep the previously working firmware and a recovery method available.
+          Verify hardware operation separately before daily use.
+          EOF
+
+      - name: Upload signed experimental install candidate
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: GC01-PARKOUR-V042-SIGNED-EXPERIMENTAL-UNTESTED
+          path: release/
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Collect raw diagnostics (do NOT flash)
         if: always()
         shell: bash
@@ -171,16 +268,16 @@ jobs:
           done
           printf '%s\n' \
             'EXPERIMENTAL GC-01 PARKOUR 0.4.2 - RAW UNSIGNED DO NOT FLASH' \
-            'NO signed -install.bin file is generated in this workflow.' \
-            'Compilation and software tests do not establish Geiger counter measurement or alarm safety.' \
-            'Keep reliable Rad Pro firmware available for recovery.' \
+            'THIS DIAGNOSTICS ARTIFACT is not installable. A separate signed artifact may exist after success.' \
+            'Compilation and software tests do not establish radiation measurement or alarm safety.' \
+            'Keep your working firmware and recovery method available.' \
             > results/DO_NOT_FLASH.txt
           (cd results && sha256sum firmware.bin firmware.elf 2>/dev/null || true) > results/binary-checksums.txt
 
-      - name: Upload build diagnostics and raw unsigned files
+      - name: Upload diagnostics and raw unsigned files (not flashable)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: GC01-PARKOUR-V042-RAW-DO-NOT-FLASH
+          name: GC01-PARKOUR-V042-RAW-DIAGNOSTICS-DO-NOT-FLASH
           path: results/
           retention-days: 14
