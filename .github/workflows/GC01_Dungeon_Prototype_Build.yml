@@ -1,10 +1,10 @@
-name: GC-01 Parkour Gauntlet 0.4.2 - build, verify and sign EXPERIMENTAL
+name: GC-01 Parkour Gauntlet 0.4.3 - build, verify and sign EXPERIMENTAL
 
 on:
   workflow_dispatch:
   push:
     paths:
-      - 'GC01_Parkour_V042_Source.zip'
+      - 'GC01_Parkour_V043_Source.zip'
       - '.github/workflows/GC01_Dungeon_Prototype_Build.yml'
 
 permissions:
@@ -18,20 +18,20 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Validate exact Parkour 0.4.2 source ZIP
+      - name: Validate exact Parkour 0.4.3 source ZIP
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p results
           echo 'Actual ZIP SHA-256:'
-          sha256sum GC01_Parkour_V042_Source.zip
-          echo 'dee507ded655c63cf1dc1c53124aa3050ae0f7bb5c43bbcd25e32eda9cf9041d  GC01_Parkour_V042_Source.zip' | sha256sum -c -
+          sha256sum GC01_Parkour_V043_Source.zip
+          echo '5ea0cd9f5d2f0b196615c1a5965b047ce257bcb2344273e655bad7edca34f38e  GC01_Parkour_V043_Source.zip' | sha256sum -c -
           python - <<'PYZIP'
           import stat
           from pathlib import PurePosixPath
           from zipfile import ZipFile
           expected = {
-              'README_PARKOUR_V042_SOURCE_ONLY.md',
+              'README_PARKOUR_V043_SOURCE_ONLY.md',
               'parkour-tests/run.sh',
               'parkour-tests/test_logic.c',
               'parkour-tests/test_render.c',
@@ -46,15 +46,18 @@ jobs:
               'platform.io/src/peripherals/keyboard.c',
               'platform.io/src/peripherals/keyboard.h',
               'platform.io/src/system/settings.c',
+              'platform.io/src/ui/draw.c',
+              'platform.io/src/ui/draw.h',
               'platform.io/src/ui/game.c',
               'platform.io/src/ui/parkour_art.h',
               'platform.io/src/ui/parkour_draw.c',
               'platform.io/src/ui/parkour_draw.h',
+              'platform.io/src/ui/rng.c',
               'platform.io/src/ui/statistics.c',
               'platform.io/src/ui/view.c',
               'platform.io/src/ui/view.h',
           }
-          with ZipFile('GC01_Parkour_V042_Source.zip') as z:
+          with ZipFile('GC01_Parkour_V043_Source.zip') as z:
               items=z.infolist()
               names=[i.filename for i in items]
               if set(names)!=expected or len(names)!=len(expected):
@@ -69,9 +72,9 @@ jobs:
                       (mode and not stat.S_ISREG(mode)) or
                       item.file_size>250000):
                       raise SystemExit('FAIL: unsafe ZIP member: '+item.filename)
-          print('PASS: 22 verified, safe source-overlay files')
+          print('PASS: 25 verified, safe source-overlay files')
           PYZIP
-          sha256sum GC01_Parkour_V042_Source.zip > results/source-checksum.txt
+          sha256sum GC01_Parkour_V043_Source.zip > results/source-checksum.txt
 
       - name: Obtain verified original Rad Pro 3.1.1 source
         shell: bash
@@ -84,7 +87,7 @@ jobs:
           mkdir -p stock
           unzip -q /tmp/radpro-3.1.1.zip -d stock
           cp -a stock/radpro-3.1.1 radpro-3.1.1
-          unzip -qo GC01_Parkour_V042_Source.zip -d radpro-3.1.1
+          unzip -qo GC01_Parkour_V043_Source.zip -d radpro-3.1.1
           test -f radpro-3.1.1/platform.io/src/extras/parkour_logic.c
 
       - name: Verify preserved firmware modules and run sanitizer tests
@@ -114,43 +117,67 @@ jobs:
           (cd radpro-3.1.1/platform.io &&
             pio run -e fnirsi-gc01_apm32f103rb-en) 2>&1 | tee results/build-full.log
 
-      - name: Automatically select the highest-quality build that fits flash
+      - name: Keep full-quality game graphics and progressively optimize optional Rad Pro fonts if required
         shell: bash
         run: |
           set -euo pipefail
           b=radpro-3.1.1/platform.io/.pio/build/fnirsi-gc01_apm32f103rb-en
+          ini=radpro-3.1.1/platform.io/platformio.ini
           limit=57340
           test -s "$b/firmware.bin"
-          full_size=$(wc -c < "$b/firmware.bin")
-          echo "Full-quality size: $full_size / $limit bytes"
-          echo "Full-quality raw image size: $full_size bytes" > results/size-comparison.txt
-          if [ "$full_size" -le "$limit" ]; then
-            echo "FULL" > results/build-variant.txt
-            echo 'Full-quality imagery retained.' >> results/build-variant.txt
-          else
-            echo "Full-quality binary exceeds the limit by $((full_size-limit)) bytes."
-            echo 'Recompiling the SAME code with PG_FLASH_COMPACT scenery only.'
-            echo 'The original size limit remains unchanged.'
-            sed -i '/^    -DGC01_PARKOUR$/a\    -DPG_FLASH_COMPACT' \
-              radpro-3.1.1/platform.io/platformio.ini
-            grep -q '^    -DPG_FLASH_COMPACT$' radpro-3.1.1/platform.io/platformio.ini
+          current=$(wc -c < "$b/firmware.bin")
+          echo "Original UI fonts and full game art: $current / $limit bytes" | tee results/size-comparison.txt
+          printf '%s\n' "FULL_GAME_FULL_RADPRO_FONTS" > results/build-variant.txt
+          # Never trim game graphics or raise the physical application limit.
+          # Upstream 2bpp font alternatives preserve original glyph dimensions;
+          # only the appearance of Rad Pro text edges can change.
+          for step in symbols large small; do
+            if [ "$current" -le "$limit" ]; then break; fi
+            echo "Application needs $((current-limit)) additional bytes."
+            echo "Optimizing Rad Pro UI $step font; retaining all game art and mechanics."
+            python - "$ini" "$step" <<'PYFONT'
+          from pathlib import Path
+          import sys
+
+          path = Path(sys.argv[1]); step = sys.argv[2]
+          options = {
+              'symbols': ('FONT_SYMBOLS', 'font_symbols_color.h', 'font_symbols_color_2bpp.h'),
+              'large': ('FONT_LARGE', 'font_large_color_115.h', 'font_large_color_115_2bpp.h'),
+              'small': ('FONT_SMALL', 'font_small_en_color_21.h', 'font_small_en_color_21_2bpp.h'),
+          }
+          name, oldfile, newfile = options[step]
+          txt = path.read_text()
+          section = '[env:fnirsi-gc01_apm32f103rb-en]'
+          i = txt.index(section)
+          j = txt.find('\n[env:', i + len(section))
+          if j < 0: j = len(txt)
+          part = txt[i:j]
+          old = f"-D{name}='\"fonts/{oldfile}\"'"
+          new = f"-D{name}='\"fonts/{newfile}\"'"
+          if part.count(old) != 1:
+              raise SystemExit(f'Unexpected {name} declaration; refusing unsafe rewrite')
+          txt = txt[:i] + part.replace(old,new) + txt[j:]
+          path.write_text(txt)
+          print(f'Using original upstream {newfile} in the English GC-01 target only')
+          PYFONT
             (
               cd radpro-3.1.1/platform.io
               pio run -e fnirsi-gc01_apm32f103rb-en -t clean
               pio run -e fnirsi-gc01_apm32f103rb-en
-            ) 2>&1 | tee results/build-compact.log
-            echo "COMPACT" > results/build-variant.txt
-            echo 'Reduced optional scenery only; gameplay and safety checks unchanged.' >> results/build-variant.txt
-          fi
-          test -s "$b/firmware.bin"
-          final_size=$(wc -c < "$b/firmware.bin")
-          echo "Final image: $final_size bytes, spare space $((limit-final_size)) bytes" \
+            ) 2>&1 | tee "results/build-ui-font-$step.log"
+            test -s "$b/firmware.bin"
+            current=$(wc -c < "$b/firmware.bin")
+            echo "After Rad Pro UI $step font optimization: $current bytes" \
+              | tee -a results/size-comparison.txt
+            echo "RADPRO_FONT_2BPP_$step" >> results/build-variant.txt
+          done
+          echo "Final raw firmware: $current bytes, free space $((limit-current)) bytes" \
             | tee -a results/size-comparison.txt
-          echo "Selected: $(head -1 results/build-variant.txt)"
-          if [ "$final_size" -gt "$limit" ]; then
-            echo "::error::Firmware is still $((final_size-limit)) bytes too large. DO NOT FLASH."
+          if [ "$current" -gt "$limit" ]; then
+            echo "::error::Firmware still exceeds safe flash limit by $((current-limit)) bytes. Refusing to sign."
             exit 1
           fi
+          echo 'PASS: complete game, full-resolution sprites, and 3 detailed themes fit.'
 
       - name: Verify ARM ELF, flash range, vector table, and RAM address bounds
         shell: bash
@@ -177,7 +204,7 @@ jobs:
           (cd radpro-3.1.1 && python tools/sign.py) 2>&1 | tee results/sign.log
           signed=radpro-3.1.1/fnirsi-gc01_apm32f103rb/firmware/radpro-fnirsi-gc01_apm32f103rb-en-3.1.1.bin
           test -s "$signed"
-          output=release/radpro-fnirsi-gc01_apm32f103rb-en-3.1.1-parkour-v042-EXPERIMENTAL-install.bin
+          output=release/radpro-fnirsi-gc01_apm32f103rb-en-3.1.1-parkour-v043-EXPERIMENTAL-install.bin
           cp "$signed" "$output"
           # Independently verify target, application content, settings metadata,
           # padding and hardware CRC. Any failure blocks the signed artifact.
@@ -233,12 +260,13 @@ jobs:
           cp results/build-variant.txt release/BUILD_VARIANT.txt
           cp results/size-comparison.txt release/SIZE_REPORT.txt
           cat > release/READ_ME_FIRST.txt <<'EOF'
-          GC-01 PARKOUR GAUNTLET 0.4.2 - SIGNED EXPERIMENTAL INSTALL CANDIDATE
+          GC-01 PARKOUR GAUNTLET 0.4.3 - SIGNED EXPERIMENTAL INSTALL CANDIDATE
 
           Target: FNIRSI GC-01 APM32F103RB, English, Rad Pro 3.1.1 base.
           The included file ending in -install.bin has passed source, native
           game tests, ARM memory layout, firmware payload and CRC checks.
-          BUILD_VARIANT.txt tells you whether FULL or COMPACT art was selected.
+          BUILD_VARIANT.txt lists optional upstream Rad Pro UI fonts optimized.
+          Game art always remains full-quality; no reduced-game-art fallback.
 
           This image is experimental and has NOT been tested on your hardware.
           Passing software checks does NOT establish radiation readings,
@@ -252,7 +280,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: GC01-PARKOUR-V042-SIGNED-EXPERIMENTAL-UNTESTED
+          name: GC01-PARKOUR-V043-SIGNED-EXPERIMENTAL-UNTESTED
           path: release/
           if-no-files-found: error
           retention-days: 14
@@ -267,7 +295,7 @@ jobs:
             if [ -f "$b/$f" ]; then cp "$b/$f" "results/$f"; fi
           done
           printf '%s\n' \
-            'EXPERIMENTAL GC-01 PARKOUR 0.4.2 - RAW UNSIGNED DO NOT FLASH' \
+            'EXPERIMENTAL GC-01 PARKOUR 0.4.3 - RAW UNSIGNED DO NOT FLASH' \
             'THIS DIAGNOSTICS ARTIFACT is not installable. A separate signed artifact may exist after success.' \
             'Compilation and software tests do not establish radiation measurement or alarm safety.' \
             'Keep your working firmware and recovery method available.' \
@@ -278,6 +306,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: GC01-PARKOUR-V042-RAW-DIAGNOSTICS-DO-NOT-FLASH
+          name: GC01-PARKOUR-V043-RAW-DIAGNOSTICS-DO-NOT-FLASH
           path: results/
           retention-days: 14
