@@ -1,0 +1,347 @@
+name: GC01 Rider v2.2 - two-file repository build
+permissions:
+  contents: read
+jobs:
+  firmware-candidate-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+    - name: Checkout repository (workflow and Rider source)
+      uses: actions/checkout@v4
+    - name: Identify Rider v2.2 workflow revision
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo '=== RIDER_V22_TWO_FILE_REPOSITORY - FRESH RUN ==='
+        echo "Commit: ${GITHUB_SHA}"
+        echo "Workflow: ${GITHUB_WORKFLOW_REF}"
+        echo 'Baseline: v2.1a, 77740 B prior build. Limit 69628 B; no partition enlargement or feature removal.'
+    - name: Unpack single Rider source file
+      shell: bash
+      run: |
+        set -euo pipefail
+        test -s source.zip || { echo 'Missing source.zip in the repository root.' >&2; exit 1; }
+        test ! -e source || { echo 'Remove the old source folder from the repository before using source.zip.' >&2; exit 1; }
+        python3 -m zipfile -t source.zip
+        python3 -m zipfile -e source.zip source
+        test -s source/RIDER_SOURCE_SHA256SUMS.txt
+        (cd source && sha256sum -c RIDER_SOURCE_SHA256SUMS.txt)
+    - name: Download pinned Rad Pro 3.1.1 code
+      shell: bash
+      run: |
+        set -euo pipefail
+        git clone https://github.com/Gissio/radpro.git radpro
+        git -C radpro checkout --detach a9d0f19
+        test -f radpro/tools/sign.py
+    - name: Install complete Rider v2.2 overlay and unchanged 68 KiB firmware layout
+      shell: bash
+      run: |
+        set -Eeuo pipefail
+        mkdir -p dist/tests
+        trap 'rc=$?; printf "Overlay install failed: exit %s, script line %s, command: %.240s\n" "$rc" "$LINENO" "$BASH_COMMAND" | tee -a dist/tests/OVERLAY_INSTALL_ERROR.txt >&2; exit "$rc"' ERR
+        # Build from the checked-in source.zip, extracted in the preceding step.
+        test -s source/RIDER_SOURCE_SHA256SUMS.txt || { echo 'Missing Rider source manifest inside source.zip.' >&2; exit 1; }
+        (cd source && sha256sum -c RIDER_SOURCE_SHA256SUMS.txt) | tee dist/tests/REPOSITORY_SOURCE_INTEGRITY.txt
+        (cd source && diff -u <(awk '{print $2}' RIDER_SOURCE_SHA256SUMS.txt | LC_ALL=C sort) <(find overlay rider_ci -type f | LC_ALL=C sort))
+        cp -a source/overlay source/rider_ci radpro/
+        echo 'RIDER_V22_REPOSITORY_SOURCE_20261124: all 91 source files verified and copied from this commit.'
+        # Keep CI source paths aligned with the repository source layout.
+        # The save module is in rider_ci/, NOT rider_ci/src/.
+        for required in \
+            rider_ci/src/rider_core.c rider_ci/src/rider_core.h \
+            rider_ci/src/rider_render.c rider_ci/src/rider_render.h \
+            rider_ci/rider_saves.c rider_ci/rider_saves.h \
+            rider_ci/tests/run.sh rider_ci/tests/render_scenes.c \
+            rider_ci/tests/bench_loop.c rider_ci/tests/flash_sim/test_saves.c \
+            rider_ci/tests/test_v09.c rider_ci/tests/test_core.c \
+            rider_ci/tests/test_visual_v09.c \
+            rider_ci/tests/test_v10.c rider_ci/tests/test_v11.c \
+            rider_ci/tests/test_reference_repairs.c rider_ci/tests/test_v12.c rider_ci/tests/test_v13.c rider_ci/tests/test_v14.c rider_ci/tests/test_v15.c rider_ci/tests/test_v16.c rider_ci/tests/test_v17.c rider_ci/tests/render_audit.c rider_ci/tests/render_run.c \
+            rider_ci/README_V17.md rider_ci/README_V18.md rider_ci/README_V19.md rider_ci/README_V20.md rider_ci/README_V21.md rider_ci/tests/test_v21.c rider_ci/tests/test_lcd_extended.c rider_ci/tests/test_v18.c rider_ci/tests/test_v19.c rider_ci/tests/test_v20.c rider_ci/tests/render_timing.c rider_ci/tests/render_motion.c \
+            overlay/platform.io/src/extras/rider_app.c \
+            overlay/platform.io/src/extras/rider_saves.c \
+            overlay/platform.io/src/extras/rider_saves.h \
+            overlay/platform.io/src/ui/rider_screen.c \
+            overlay/platform.io/src/ui/rider_render.h; do
+          test -s "radpro/$required" || { echo "Repository source is missing: $required" >&2; exit 1; }
+        done
+        cmp radpro/rider_ci/src/rider_render.c radpro/overlay/platform.io/src/ui/rider_render.c
+        cmp radpro/rider_ci/src/rider_core.c radpro/overlay/platform.io/src/extras/rider_core.c
+        cmp radpro/rider_ci/src/rider_core.h radpro/overlay/platform.io/src/extras/rider_core.h
+        cmp radpro/rider_ci/rider_screen.c radpro/overlay/platform.io/src/ui/rider_screen.c
+        test -s radpro/rider_ci/tests/test_v09.c
+        echo 'Verified save file root: radpro/rider_ci/rider_saves.c'
+        cmp radpro/rider_ci/rider_saves.c radpro/overlay/platform.io/src/extras/rider_saves.c
+        grep -q 'case EVENT_HEARTBEAT' radpro/overlay/platform.io/src/extras/rider_app.c
+        grep -q 'requestBacklightTrigger' radpro/overlay/platform.io/src/extras/rider_app.c
+        grep -q '^#define STRIP_ROWS 3$' radpro/rider_ci/src/rider_render.c
+        grep -Fq 'static uint8_t facet[W/4];' radpro/rider_ci/src/rider_render.c
+        grep -q '^MIN_STACK_HEADROOM = 3072' radpro/rider_ci/verify_expanded.py
+        echo 'v2.1: static renderer arrays 3061 B; nominal SRAM threshold 3072 B unchanged.'
+        test -d radpro/platform.io/src || { echo 'Pinned Rad Pro source tree missing platform.io/src' >&2; exit 1; }
+        echo 'Installing verified overlay into pinned Rad Pro source tree.'
+        cp -a radpro/overlay/platform.io/src/. radpro/platform.io/src/
+        # Header-path regression: the renderer lives in ui/ but the Rider
+        # physics header lives in extras/. Fail BEFORE the ARM compile if
+        # the source bundle ever reintroduces the missing-header bug.
+        test -s radpro/platform.io/src/extras/rider_core.h
+        grep -Fq '#include "../extras/rider_core.h"' radpro/platform.io/src/ui/rider_render.h
+        echo 'PASS: firmware renderer header uses extras/rider_core.h via relative include.'
+        printf '#include "rider_render.h"\n#include "rider_screen.h"\nint main(void) { return 0; }\n' | gcc -std=c11 -Wall -Wextra -Werror -DGC01_RIDER -Iradpro/platform.io/src/ui -x c -fsyntax-only -
+        gcc -std=c11 -Wall -Wextra -Werror -DGC01_RIDER -fsyntax-only radpro/platform.io/src/ui/rider_render.c
+        echo 'PASS: installed firmware renderer and screen headers compile with no host include path.'
+        python3 radpro/rider_ci/apply_expanded_layout.py
+        python3 radpro/rider_ci/test_expanded_layout.py
+        echo 'PASS: v2.2 overlay install and layout checks completed.'
+
+        for f in rider_ci/select_size_profile.sh rider_ci/preflight_profile.py rider_ci/tests/test_lossless.c rider_ci/tests/run_lossless.sh rider_ci/README_V22.md; do test -s "radpro/$f"; done
+    - name: Run GCC and Clang gameplay, renderer and memory-safety tests
+      shell: bash
+      run: "set -euo pipefail\nmkdir -p \"$GITHUB_WORKSPACE/dist/tests\" \"$GITHUB_WORKSPACE/dist/previews\"\ncd radpro/rider_ci\n{\n  echo 'GCC / AddressSanitizer / UndefinedBehaviorSanitizer / gameplay tests'\n  echo \"Git commit: $GITHUB_SHA\"\n  gcc --version | head -n 1\n  CC=gcc bash tests/run.sh\n  echo 'GCC host tests: PASS'\n} 2>&1 | tee \"$GITHUB_WORKSPACE/dist/tests/GCC_TEST_RESULTS.txt\"\ngcc -std=c11 -O2 -Wall -Wextra -Werror src/rider_core.c src/rider_render.c tests/host_render_benchmark.c -o /tmp/rider_v09_host_bench\n/tmp/rider_v09_host_bench | tee \"$GITHUB_WORKSPACE/dist/tests/HOST_RENDER_BENCHMARK.txt\"\ngcc -std=c11 -O2 -Wall -Wextra -Werror src/rider_core.c src/rider_render.c tests/bench_loop.c -o /tmp/rider_v09_loop_bench\n/tmp/rider_v09_loop_bench | tee \"$GITHUB_WORKSPACE/dist/tests/LOOP_RENDER_BENCHMARK.txt\"\ngcc -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=address,undefined -no-pie src/rider_core.c src/rider_render.c tests/render_audit.c -o /tmp/rider_v17_qa\n/tmp/rider_v17_qa | tee \"$GITHUB_WORKSPACE/dist/tests/LIVE_300_FRAME_QA.txt\"\n{\n  echo 'Clang / AddressSanitizer / UndefinedBehaviorSanitizer'\n  clang --version | head -n 1\n  CC=clang bash tests/run.sh\n  echo 'Clang host tests: PASS' \n} 2>&1 | tee \"$GITHUB_WORKSPACE/dist/tests/CLANG_TEST_RESULTS.txt\"\n\nCC=gcc bash tests/run_lossless.sh | tee \"$GITHUB_WORKSPACE/dist/tests/LOSSLESS_GCC.txt\"\nCC=clang bash tests/run_lossless.sh | tee \"$GITHUB_WORKSPACE/dist/tests/LOSSLESS_CLANG.txt\"\n"
+    - name: Produce preview images using the SAME tested C renderer
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p dist/previews dist/tests
+        scenes=(referencecurl curlexit referencedrop arc gap risegap highgap moving falling giantsaw sawvalley wall bowl perfect ring lift twosaws twopads timedspikes splitbowl slopeup slopedown openloop score spikes triangle detachedbowl)
+        {
+          gcc -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=address,undefined -no-pie radpro/rider_ci/src/rider_core.c radpro/rider_ci/src/rider_render.c radpro/rider_ci/tests/render_run.c -o /tmp/rider_v18_live_preview
+          for scene in "${scenes[@]}"; do
+            echo "Rendering $scene"
+            ASAN_OPTIONS=detect_leaks=1 /tmp/rider_v18_live_preview "$scene" "$GITHUB_WORKSPACE/dist/previews/$scene.ppm"
+          done
+        } 2>&1 | tee dist/tests/PREVIEW_RESULTS.txt
+        # Convert raw PPM screenshots to PNG using Python's standard library.
+        # A pure conversion: no AI-generated or altered screenshots.
+        python3 - "${scenes[@]}" <<'PYPNG'
+        import struct, zlib, sys
+        from pathlib import Path
+        folder=Path('dist/previews')
+        scenes=sys.argv[1:]
+        if len(scenes)!=len(set(scenes)) or not scenes:
+            raise RuntimeError(f'Invalid preview scene list: {scenes}')
+        expected_ppm={f'{scene}.ppm' for scene in scenes}
+        expected_png={f'{scene}.png' for scene in scenes}
+        actual_ppm={p.name for p in folder.glob('*.ppm') if p.is_file()}
+        if actual_ppm!=expected_ppm:
+            raise RuntimeError(f'PPM set mismatch: missing={sorted(expected_ppm-actual_ppm)}, extra={sorted(actual_ppm-expected_ppm)}')
+        def chunk(t, payload):
+            return struct.pack('>I',len(payload))+t+payload+struct.pack('>I',zlib.crc32(t+payload)&0xffffffff)
+        for src in sorted(folder.glob('*.ppm')):
+            buf=src.read_bytes()
+            hdr=b'P6\n320 240\n255\n'
+            if not buf.startswith(hdr): raise RuntimeError(f'Unexpected PPM header: {src}')
+            rgb=buf[len(hdr):]
+            if len(rgb)!=320*240*3: raise RuntimeError(f'Unexpected frame size: {src}, {len(rgb)} bytes')
+            raw=b''.join(b'\x00'+rgb[row*320*3:(row+1)*320*3] for row in range(240))
+            png=b'\x89PNG\r\n\x1a\n'
+            png+=chunk(b'IHDR',struct.pack('>IIBBBBB',320,240,8,2,0,0,0))
+            png+=chunk(b'IDAT',zlib.compress(raw,6))
+            png+=chunk(b'IEND',b'')
+            src.with_suffix('.png').write_bytes(png)
+            src.unlink()
+            print('Generated',src.with_suffix('.png'))
+        actual_png={p.name for p in folder.glob('*.png') if p.is_file() and p.stat().st_size>0}
+        if actual_png!=expected_png:
+            raise RuntimeError(f'PNG set mismatch: missing={sorted(expected_png-actual_png)}, extra={sorted(actual_png-expected_png)}')
+        print(f'Validated all {len(expected_png)} expected PNG previews.')
+        PYPNG
+    - name: Install PlatformIO and font-building prerequisites
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 -m pip install platformio pyelftools freetype-py bdflib
+    - name: Generate original Rad Pro display font headers
+      shell: bash
+      run: |
+        set -euo pipefail
+        test -f radpro/fonts/RadPro-Symbols.ttf || { echo 'Missing pinned Rad Pro font sources'; exit 1; }
+        (cd radpro/tools && python3 build-fonts.py)
+        test -s radpro/platform.io/src/ui/fonts/font_small_en_color_21.h
+        test -s radpro/platform.io/src/ui/fonts/font_medium_en_color_32.h
+    - name: Compile and select fitting ARM size profile (unchanged quality and partition)
+      shell: bash
+      run: |
+        set -euo pipefail
+        cd radpro
+        bash rider_ci/select_size_profile.sh
+        sha256sum -c "$GITHUB_WORKSPACE/dist/tests/size/SELECTED_BUILD_HASHES.txt"
+    - name: Generate official Rad Pro-style CRC update image
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p dist/tests
+        # The upstream signer can skip oversized binaries and still return 0.
+        # Keep the original 68 KiB partition and reserve the 4-byte CRC.
+        (
+          set -euo pipefail
+          cd radpro
+          RAW=platform.io/.pio/build/fnirsi-gc01_apm32f103rb-en/firmware.bin
+          ELF=platform.io/.pio/build/fnirsi-gc01_apm32f103rb-en/firmware.elf
+          SIGNED=fnirsi-gc01_apm32f103rb/firmware/radpro-fnirsi-gc01_apm32f103rb-en-3.1.1.bin
+          test -s "$RAW" && test -s "$ELF" || { echo 'ERROR: target raw binary or ELF missing'; exit 1; }
+          python3 - "$RAW" "$ELF" <<'PY'
+        import pathlib, sys
+        sys.path.insert(0, 'rider_ci')
+        from verify_expanded import APP_SIZE, APP_BASE, SETTINGS_BASE, SETTINGS_SIZE, LOG_BASE, LOG_SIZE, extract_metadata
+        raw, elf = map(pathlib.Path, sys.argv[1:])
+        size = raw.stat().st_size
+        limit = APP_SIZE - 4
+        print(f'Raw firmware: {size} bytes; maximum payload: {limit} bytes; remaining: {limit-size} bytes', flush=True)
+        if size > limit:
+            raise SystemExit(f'ERROR: firmware exceeds the 68 KiB application payload by {size-limit} bytes. Do not increase the partition or truncate the binary.')
+        if size < 0x28:
+            raise SystemExit('ERROR: raw firmware is too short for the settings header')
+        _, meta = extract_metadata(elf)
+        print(f'ELF layout metadata: {meta}', flush=True)
+        expected = dict(FLASH_BASE=0x08000000, FLASH_SIZE=0x20000, FIRMWARE_BASE=APP_BASE, FIRMWARE_SIZE=APP_SIZE, STATES_BASE=SETTINGS_BASE, STATES_SIZE=SETTINGS_SIZE, DATALOG_BASE=LOG_BASE, DATALOG_SIZE=LOG_SIZE)
+        if any(meta.get(k) != v for k,v in expected.items()):
+            raise SystemExit('ERROR: ELF metadata does not match the audited partition layout; refusing to sign.')
+        PY
+          # Remove only the exact expected output, so a stale image cannot pass.
+          rm -f -- "$SIGNED"
+          python3 tools/sign.py
+          if ! test -s "$SIGNED"; then
+            echo "ERROR: Rad Pro signer returned without producing $SIGNED"
+            echo 'Firmware version in source:'
+            grep '^#define FIRMWARE_VERSION ' platform.io/src/system/system.h || true
+            echo 'Files actually produced by the signer:'
+            if test -d fnirsi-gc01_apm32f103rb/firmware; then
+              find fnirsi-gc01_apm32f103rb/firmware -maxdepth 1 -type f -printf '%f %s bytes\n'
+            fi
+            exit 1
+          fi
+          echo "PASS: signed image created: $SIGNED ($(wc -c < "$SIGNED") bytes)"
+        ) 2>&1 | tee dist/tests/SIGNING_LOG.txt
+        cp dist/tests/SIGNING_LOG.txt /tmp/rider_expanded_sign.log
+    - name: Audit CRC, vectors, flash partitions and at least 3072 B spare SRAM
+      shell: bash
+      run: |
+        set -euo pipefail
+        cd radpro
+        RAW=platform.io/.pio/build/fnirsi-gc01_apm32f103rb-en/firmware.bin
+        ELF=platform.io/.pio/build/fnirsi-gc01_apm32f103rb-en/firmware.elf
+        SIGNED=fnirsi-gc01_apm32f103rb/firmware/radpro-fnirsi-gc01_apm32f103rb-en-3.1.1.bin
+        test -s "$SIGNED" || { echo "ERROR: expected signed image missing: $SIGNED" >&2; exit 1; }
+        python3 rider_ci/verify_expanded.py "$RAW" "$ELF" "$SIGNED" 2>&1 | tee /tmp/rider_expanded_audit.log
+        mkdir -p ../dist/source
+        cp rider_ci/src/rider_core.c rider_ci/src/rider_core.h rider_ci/src/rider_render.c rider_ci/src/rider_render.h ../dist/source/
+        cp rider_ci/README_V19.md rider_ci/README_V20.md rider_ci/README_V21.md ../dist/source/
+        printf 'ARM nominal headroom must be >= 3072 bytes; renderer arrays are 3061 B; no change to audit threshold.\n' > ../dist/tests/V17_RAM_NOTES.txt
+        cp rider_ci/rider_saves.c rider_ci/rider_saves.h overlay/platform.io/src/extras/rider_app.c ../dist/source/
+        cp rider_ci/README_V22.md ../dist/source/README.md
+        cp rider_ci/tests/test_lossless.c rider_ci/tests/run_lossless.sh rider_ci/select_size_profile.sh rider_ci/preflight_profile.py ../dist/source/
+        cp -a rider_ci/tests/reference_v21a ../dist/source/
+        cp rider_ci/tests/test_v11.c ../dist/source/test_v11.c
+        cp rider_ci/tests/test_reference_repairs.c rider_ci/tests/test_v12.c rider_ci/tests/test_v13.c rider_ci/tests/test_v14.c rider_ci/tests/test_v15.c rider_ci/tests/test_v16.c rider_ci/tests/test_v17.c rider_ci/tests/test_v18.c rider_ci/tests/test_v19.c rider_ci/tests/test_v20.c rider_ci/tests/render_timing.c rider_ci/tests/render_audit.c rider_ci/tests/render_run.c ../dist/source/
+        cp rider_ci/tests/test_v21.c rider_ci/tests/test_lcd_extended.c ../dist/source/
+        cp "$SIGNED" ../dist/GC01_RIDER_V22_LOSSLESS_APM32_68K_DO_NOT_FLASH.bin
+        cp "$ELF" ../dist/GC01_RIDER_V22_LOSSLESS_APM32_DIAGNOSTIC.elf
+        cp /tmp/rider_expanded_audit.log ../dist/ADDRESS_AND_MEMORY_AUDIT.txt
+        cat > ../dist/READ_BEFORE_FLASHING.txt <<'TXT'
+        EXPERIMENTAL GC01 APM32 FLASH IMAGE; DO NOT FLASH. NOT HARDWARE VALIDATED.
+        16 KiB original bootloader / 68 KiB firmware / 2 KiB game score journal
+        / 1 KiB moved settings / 41 KiB moved radiation log.
+
+        THE ~25% HISTORY PARTITION REDUCTION IS INCLUDED. NEW LOG COMPRESSION IS NOT.
+        Renderer uses 3-row RGB565 strips with 3061 B static arrays, plus
+        a 960 B three-tile 32-bit checksum cache. ST7789 uses a parallel GPIO bus on
+        the GC01, not SPI. Skips unchanged tiles; periodic refresh repairs stale pixels.
+        On-device frame rate is UNMEASURED for v2.1 (user saw ~20 FPS in an earlier build).
+        This build intentionally does NOT migrate the old calibration and history.
+        Old settings, cumulative readings, and radiation records MAY BE LOST.
+        A successful CRC, ELF check or GitHub build CANNOT prove the USB bootloader
+        accepts the expanded layout. Some APM32 GC01 devices fail normal 3.x USB
+        updates. If flashing fails, SWD recovery may be required.
+        This package has NOT been run on an actual GC01. Preserve a known-good
+        firmware and your instrument settings before considering installation.
+        Gameplay physics are an approximation, not original Box2D. A true
+        non-monotonic loop is drawn and traversed using a guided model.
+        Moving and contact-triggered falling platforms are independently approximated.
+        New dynamic platforms and giant saws occur in ordinary generation; full original hazard library remains incomplete.
+        Hand-built open-loop, vertical, bowl and jump pieces do not reproduce original game data.
+        v2.1 retains the 2/3 world projection and fixed blue/pink palette, adds
+        two reference-inspired deck structures, low-speed rail rollback and stronger LCD caching.
+        v2.2 preserves v2.1a game output in differential tests and uses selected size optimization flags.
+        Compiler settings can affect timing; perceived smoothness must be judged on hardware.
+        The game is NOT proven bug-free; actual hardware and radiation pulse timing still require measurement.
+        Persistent Rider best/diamonds journal uses the reserved 2KiB save pages;
+        writes only on explicit game exit (abrupt power loss may lose records); flash-write impact on
+        pulse interrupts is NOT hardware-validated.
+        Do not rely on this experimental build for radiation safety decisions.
+        TXT
+        cat > ../dist/BUILD_AND_TEST_SUMMARY.txt <<'TXT'
+        One workflow run produces both firmware candidate and all host test results.
+        The signed candidate binary is GC01_RIDER_V22_LOSSLESS_APM32_68K_DO_NOT_FLASH.bin.
+        The tests/ folder contains GCC, Clang, sanitizers, preview, compile and signing logs.
+        Includes SOURCE-LEVEL collision and 2:3 visual-alignment regressions.
+        The previews/ folder contains 27 320x240 PNG files drawn by the actual C renderer.
+        PASS criteria: both host test suites, build, sign, address/CRC/memory audit.
+        SOURCE in source/ is the exact engine and renderer tested and compiled.
+        NOTE: hardware FPS, bootloader behavior, calibration migration and radiation
+        safety cannot be certified by GitHub Actions tests. See READ_BEFORE_FLASHING.txt.
+        TXT
+        (cd ../dist && sha256sum *.bin *.elf previews/*.png source/*.c source/*.h > SHA256SUMS.txt)
+    - name: Verify the ONE combined artifact is complete
+      shell: bash
+      run: |
+        set -euo pipefail
+        test -s dist/GC01_RIDER_V22_LOSSLESS_APM32_68K_DO_NOT_FLASH.bin
+        test -s dist/GC01_RIDER_V22_LOSSLESS_APM32_DIAGNOSTIC.elf
+        test -s dist/ADDRESS_AND_MEMORY_AUDIT.txt
+        test -s dist/source/test_v11.c
+        test -s dist/source/test_reference_repairs.c
+        test -s dist/source/test_v12.c
+        test -s dist/source/test_v13.c
+        test -s dist/source/test_v14.c
+        test -s dist/source/test_v15.c
+        test -s dist/source/test_v16.c
+        test -s dist/source/test_v17.c
+        test -s dist/source/test_v18.c
+        test -s dist/source/test_v19.c
+        test -s dist/source/test_v20.c
+        test -s dist/source/test_v21.c
+        test -s dist/source/test_lcd_extended.c
+        test -s dist/source/render_timing.c
+        test -s dist/source/render_run.c
+        test -s dist/tests/GCC_TEST_RESULTS.txt
+        test -s dist/tests/CLANG_TEST_RESULTS.txt
+        test -s dist/tests/PREVIEW_RESULTS.txt
+        test -s dist/tests/HOST_RENDER_BENCHMARK.txt
+        test -s dist/tests/LOOP_RENDER_BENCHMARK.txt
+        test -s dist/tests/PLATFORMIO_BUILD_LOG.txt
+        test -s dist/tests/SIGNING_LOG.txt
+        test -s dist/tests/LOSSLESS_GCC.txt
+        test -s dist/tests/LOSSLESS_CLANG.txt
+        test -s dist/tests/size/SIZE_RESULTS.tsv
+        test -s dist/tests/size/SELECTED_PROFILE.txt
+        for scene in referencecurl curlexit referencedrop arc gap risegap highgap moving falling giantsaw sawvalley wall bowl perfect ring lift twosaws twopads timedspikes splitbowl slopeup slopedown openloop score spikes triangle detachedbowl; do test -s "dist/previews/$scene.png"; done
+        (cd dist && sha256sum -c SHA256SUMS.txt)
+        echo 'RIDER_V22: All tests, previews and signed firmware present in the same artifact.'
+    - name: Upload only if ALL structural audits pass
+      uses: actions/upload-artifact@v4
+      with:
+        name: GC01-RIDER-V22-LOSSLESS-ALL-TESTS-AND-FIRMWARE-UNVERIFIED
+        path: dist/
+        if-no-files-found: error
+        retention-days: 14
+    - name: Upload diagnostics only if a step fails
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: GC01-RIDER-V22-FAILURE-DIAGNOSTICS-NO-FIRMWARE
+        path: |
+          dist/tests/
+          dist/previews/
+        if-no-files-found: ignore
+        retention-days: 14
+    - name: Failure information
+      if: failure()
+      shell: bash
+      run: |
+        echo 'No experimental firmware released because a build/audit step failed.'
+        if test -f /tmp/rider_expanded_build.log; then tail -n 80 /tmp/rider_expanded_build.log; fi
+        if test -f dist/tests/SIGNING_LOG.txt; then tail -n 60 dist/tests/SIGNING_LOG.txt; fi
+        if test -f /tmp/rider_expanded_audit.log; then cat /tmp/rider_expanded_audit.log; fi
+'on':
+  workflow_dispatch: null
