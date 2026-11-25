@@ -1,4 +1,4 @@
-name: GC01 Rider v2.9 - fixed two-file build (75 KiB)
+name: GC01 Rider v2.9.1 - lossless flash fit (75 KiB)
 'on':
   workflow_dispatch: {}
 permissions:
@@ -12,19 +12,19 @@ jobs:
         name: Checkout repository (workflow and source ZIP)
       - run: |
           set -euo pipefail
-          printf '%s  %s\n' '5875eee15a6bf5ae14a94139c5f4aff4389067e92adc1dff3d7e6f122bec2e49' 'rider-v29-source.zip' | sha256sum -c -
+          printf '%s  %s\n' '4eb23b77939db7cefa117dac7138e887665ee166158c5ac0fd48fe23f2802652' 'rider-v29-source.zip' | sha256sum -c -
           python3 -m zipfile -e rider-v29-source.zip "$RUNNER_TEMP/rider-v29-bundle"
           (cd "$RUNNER_TEMP/rider-v29-bundle" && sha256sum -c RIDER_SOURCE_SHA256SUMS.txt)
         name: Verify source ZIP and extract build scripts
         shell: bash
       - run: |
           set -euo pipefail
-          echo '=== RIDER_V29_75K_TWO_FILE - FRESH RUN ==='
+          echo '=== RIDER_V291_FLASH_FIT - FRESH RUN ==='
           echo "Commit: ${GITHUB_SHA}"
           echo "Workflow: ${GITHUB_WORKFLOW_REF}"
           echo '75 KiB firmware, 34 KiB history; require 300 B flash reserve and 3328 B nominal SRAM headroom.'
           echo 'Flash fit before full gameplay tests; cache only clean dependencies and original fonts.'
-        name: Identify v2.9 workflow revision
+        name: Identify v2.9.1 workflow revision
         shell: bash
       - uses: actions/cache/restore@v4
         name: Restore pristine Rad Pro Git cache
@@ -125,7 +125,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         name: Upload only if ALL structural audits pass
         with:
-          name: GC01-RIDER-V29-75K-ALL-TESTS-DIAGNOSTIC-FIRMWARE
+          name: GC01-RIDER-V291-75K-ALL-TESTS-DIAGNOSTIC-FIRMWARE
           path: dist/
           if-no-files-found: error
           retention-days: 14
@@ -133,7 +133,7 @@ jobs:
         name: Upload diagnostics only if a step fails
         if: failure()
         with:
-          name: GC01-RIDER-V29-75K-FAILURE-DIAGNOSTICS-NO-FIRMWARE
+          name: GC01-RIDER-V291-75K-FAILURE-DIAGNOSTICS-NO-FIRMWARE
           path: |
             dist/tests/
             dist/previews/
@@ -150,7 +150,7 @@ jobs:
       - run: |
           set -euo pipefail
           {
-            echo '## GC01 Rider v2.9 75 KiB'
+            echo '## GC01 Rider v2.9.1 75 KiB'
             if test -s dist/tests/size/SIZE_RESULTS.tsv; then
               echo 'Compiler profile results (bytes):'
               echo '```text'
