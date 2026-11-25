@@ -1,0 +1,168 @@
+name: GC01 Rider v2.9 - fixed two-file build (75 KiB)
+'on':
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  firmware-candidate-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+        name: Checkout repository (workflow and source ZIP)
+      - run: |
+          set -euo pipefail
+          printf '%s  %s\n' '5875eee15a6bf5ae14a94139c5f4aff4389067e92adc1dff3d7e6f122bec2e49' 'rider-v29-source.zip' | sha256sum -c -
+          python3 -m zipfile -e rider-v29-source.zip "$RUNNER_TEMP/rider-v29-bundle"
+          (cd "$RUNNER_TEMP/rider-v29-bundle" && sha256sum -c RIDER_SOURCE_SHA256SUMS.txt)
+        name: Verify source ZIP and extract build scripts
+        shell: bash
+      - run: |
+          set -euo pipefail
+          echo '=== RIDER_V29_75K_TWO_FILE - FRESH RUN ==='
+          echo "Commit: ${GITHUB_SHA}"
+          echo "Workflow: ${GITHUB_WORKFLOW_REF}"
+          echo '75 KiB firmware, 34 KiB history; require 300 B flash reserve and 3328 B nominal SRAM headroom.'
+          echo 'Flash fit before full gameplay tests; cache only clean dependencies and original fonts.'
+        name: Identify v2.9 workflow revision
+        shell: bash
+      - uses: actions/cache/restore@v4
+        name: Restore pristine Rad Pro Git cache
+        id: radpro_cache
+        continue-on-error: true
+        with:
+          path: radpro/.git
+          key: rider-radpro-git-v1-${{ runner.os }}-${{ runner.arch }}-a9d0f19
+      - run: bash --noprofile --norc -e -o pipefail "$RUNNER_TEMP/rider-v29-bundle/workflow_scripts/step_03.sh"
+        name: Prepare pinned Rad Pro 3.1.1 source (retry and cache)
+        shell: bash
+      - uses: actions/cache/save@v4
+        name: Save pristine Rad Pro Git cache
+        if: steps.radpro_cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        with:
+          path: radpro/.git
+          key: rider-radpro-git-v1-${{ runner.os }}-${{ runner.arch }}-a9d0f19
+      - run: bash --noprofile --norc -e -o pipefail "$RUNNER_TEMP/rider-v29-bundle/workflow_scripts/step_05.sh"
+        name: Verify and extract Rider v2.9 source ZIP; install 75 KiB layout
+        shell: bash
+      - run: bash --noprofile --norc -e -o pipefail "$RUNNER_TEMP/rider-v29-bundle/workflow_scripts/step_06.sh"
+        name: Install PlatformIO and original font-building tools
+        shell: bash
+      - run: bash --noprofile --norc -e -o pipefail "$RUNNER_TEMP/rider-v29-bundle/workflow_scripts/step_07.sh"
+        name: Fingerprint font and compiler cache inputs
+        shell: bash
+        id: keys
+      - uses: actions/cache/restore@v4
+        name: Restore original generated fonts
+        id: font_cache
+        continue-on-error: true
+        with:
+          path: |-
+            radpro/platform.io/src/ui/fonts
+            radpro/.rider-fonts.sha256
+          key: rider-full-fonts-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.keys.outputs.font }}
+      - run: bash --noprofile --norc -e -o pipefail "$RUNNER_TEMP/rider-v29-bundle/workflow_scripts/step_09.sh"
+        name: Verify cached fonts or generate original Rad Pro fonts
+        shell: bash
+      - uses: actions/cache/save@v4
+        name: Save fonts now, even if later flash fitting fails
+        if: steps.font_cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        with:
+          path: |-
+            radpro/platform.io/src/ui/fonts
+            radpro/.rider-fonts.sha256
+          key: rider-full-fonts-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.keys.outputs.font }}
+      - uses: actions/cache/restore@v4
+        name: Restore ARM compiler and PlatformIO platform packages
+        id: pio_cache
+        continue-on-error: true
+        with:
+          path: |-
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: rider-pio-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.keys.outputs.pio }}
+          restore-keys: |
+            rider-pio-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.keys.outputs.pio }}
+            rider-pio-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.keys.outputs.old_pio }}
+      - run: bash --noprofile --norc -e -o pipefail "$RUNNER_TEMP/rider-v29-bundle/workflow_scripts/step_12.sh"
+        name: FIRST GATE - require 75 KiB fit, 300 B flash reserve and improved RAM
+        shell: bash
+        id: compile
+      - run: bash --noprofile --norc -e -o pipefail "$RUNNER_TEMP/rider-v29-bundle/workflow_scripts/step_13.sh"
+        name: Check whether ARM dependencies completed a usable compilation
+        shell: bash
+        id: cacheable
+        if: '${{ !cancelled() && steps.pio_cache.outputs.cache-hit != ''true'' && (steps.compile.outcome == ''success'' || steps.compile.outcome == ''failure'') }}'
+      - uses: actions/cache/save@v4
+        name: Save successfully used ARM compiler dependencies
+        if: '${{ !cancelled() && steps.cacheable.outputs.ok == ''true'' && steps.pio_cache.outputs.cache-hit != ''true'' }}'
+        continue-on-error: true
+        with:
+          path: |-
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: rider-pio-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.keys.outputs.pio }}
+      - run: bash --noprofile --norc -e -o pipefail "$RUNNER_TEMP/rider-v29-bundle/workflow_scripts/step_15.sh"
+        name: Run complete GCC and Clang sanitizer and differential suites in parallel
+        shell: bash
+      - run: bash --noprofile --norc -e -o pipefail "$RUNNER_TEMP/rider-v29-bundle/workflow_scripts/step_16.sh"
+        name: Run original rendering benchmarks and 300-frame QA
+        shell: bash
+      - run: bash --noprofile --norc -e -o pipefail "$RUNNER_TEMP/rider-v29-bundle/workflow_scripts/step_17.sh"
+        name: Produce preview images using the SAME tested C renderer
+        shell: bash
+      - run: bash --noprofile --norc -e -o pipefail "$RUNNER_TEMP/rider-v29-bundle/workflow_scripts/step_18.sh"
+        name: Generate official Rad Pro-style CRC update image
+        shell: bash
+      - run: bash --noprofile --norc -e -o pipefail "$RUNNER_TEMP/rider-v29-bundle/workflow_scripts/step_19.sh"
+        name: Audit CRC, vectors, flash partitions and at least 3328 B spare SRAM
+        shell: bash
+      - run: bash --noprofile --norc -e -o pipefail "$RUNNER_TEMP/rider-v29-bundle/workflow_scripts/step_20.sh"
+        name: Verify the ONE combined artifact is complete
+        shell: bash
+      - uses: actions/upload-artifact@v4
+        name: Upload only if ALL structural audits pass
+        with:
+          name: GC01-RIDER-V29-75K-ALL-TESTS-DIAGNOSTIC-FIRMWARE
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        name: Upload diagnostics only if a step fails
+        if: failure()
+        with:
+          name: GC01-RIDER-V29-75K-FAILURE-DIAGNOSTICS-NO-FIRMWARE
+          path: |
+            dist/tests/
+            dist/previews/
+          if-no-files-found: ignore
+          retention-days: 14
+      - run: |
+          echo 'No experimental firmware released because a build/audit step failed.'
+          if test -f /tmp/rider_expanded_build.log; then tail -n 80 /tmp/rider_expanded_build.log; fi
+          if test -f dist/tests/SIGNING_LOG.txt; then tail -n 60 dist/tests/SIGNING_LOG.txt; fi
+          if test -f /tmp/rider_expanded_audit.log; then cat /tmp/rider_expanded_audit.log; fi
+        name: Failure information
+        if: failure()
+        shell: bash
+      - run: |
+          set -euo pipefail
+          {
+            echo '## GC01 Rider v2.9 75 KiB'
+            if test -s dist/tests/size/SIZE_RESULTS.tsv; then
+              echo 'Compiler profile results (bytes):'
+              echo '```text'
+              cat dist/tests/size/SIZE_RESULTS.tsv
+              echo '```'
+            fi
+            if test -s dist/tests/size/SELECTED_PROFILE.txt; then
+              cat dist/tests/size/SELECTED_PROFILE.txt
+            fi
+            if test -s dist/tests/FLASH_BUDGET.txt; then cat dist/tests/FLASH_BUDGET.txt; fi
+            echo 'Firmware is diagnostic only; do not flash. If no profile fits, no signed firmware is published.'
+          } >> "$GITHUB_STEP_SUMMARY"
+        name: Show flash size and build results
+        shell: bash
+        if: always()
