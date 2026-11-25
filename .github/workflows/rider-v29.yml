@@ -1,0 +1,96 @@
+name: GC01 Rider v2.9 - compact two-file build (75 KiB)
+'on':
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  firmware-candidate-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+    - name: Checkout repository (workflow and source ZIP)
+      uses: actions/checkout@v4
+    - name: Verify source ZIP and extract build scripts
+      shell: bash
+      run: |
+        set -euo pipefail
+        printf '%s  %s\n' '5875eee15a6bf5ae14a94139c5f4aff4389067e92adc1dff3d7e6f122bec2e49' 'rider-v29-source.zip' | sha256sum -c -
+        python3 -m zipfile -e rider-v29-source.zip "$RUNNER_TEMP/rider-v29-bundle"
+        (cd "$RUNNER_TEMP/rider-v29-bundle" && sha256sum -c RIDER_SOURCE_SHA256SUMS.txt)
+    - name: Identify v2.9 workflow revision
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo '=== RIDER_V29_75K_TWO_FILE - FRESH RUN ==='
+        echo "Commit: ${GITHUB_SHA}"
+        echo "Workflow: ${GITHUB_WORKFLOW_REF}"
+        echo '75 KiB firmware, 34 KiB history; require 300 B flash reserve and 3328 B nominal SRAM headroom.'
+        echo 'Flash fit before full gameplay tests; cache only clean dependencies and original fonts.'
+    - name: Restore pristine Rad Pro Git cache
+      uses: actions/cache/restore@v4
+      id: radpro_cache
+      continue-on-error: true
+      with:
+        path: radpro/.git
+        key: rider-radpro-git-v1-${{ runner.os }}-${{ runner.arch }}-a9d0f19
+    - name: Prepare pinned Rad Pro 3.1.1 source (retry and cache)
+      shell: bash
+      run: bash --noprofile --norc -e -o pipefail "$RUNNER_TEMP/rider-v29-bundle/workflow_scripts/step_03.sh"
+    - name: Save pristine Rad Pro Git cache
+      uses: actions/cache/save@v4
+      if: steps.radpro_cache.outputs.cache-hit != 'true'
+      continue-on-error: true
+      with:
+        path: radpro/.git
+        key: rider-radpro-git-v1-${{ runner.os }}-${{ runner.arch }}-a9d0f19
+    - name: Verify and extract Rider v2.9 source ZIP; install 75 KiB layout
+      shell: bash
+      run: bash --noprofile --norc -e -o pipefail "$RUNNER_TEMP/rider-v29-bundle/workflow_scripts/step_05.sh"
+    - name: Install PlatformIO and original font-building tools
+      shell: bash
+      run: bash --noprofile --norc -e -o pipefail "$RUNNER_TEMP/rider-v29-bundle/workflow_scripts/step_06.sh"
+    - name: Fingerprint font and compiler cache inputs
+      shell: bash
+      id: keys
+      run: bash --noprofile --norc -e -o pipefail "$RUNNER_TEMP/rider-v29-bundle/workflow_scripts/step_07.sh"
+    - name: Restore original generated fonts
+      uses: actions/cache/restore@v4
+      id: font_cache
+      continue-on-error: true
+      with:
+        path: |-
+          radpro/platform.io/src/ui/fonts
+          radpro/.rider-fonts.sha256
+        key: rider-full-fonts-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.keys.outputs.font }}
+    - name: Verify cached fonts or generate original Rad Pro fonts
+      shell: bash
+      run: bash --noprofile --norc -e -o pipefail "$RUNNER_TEMP/rider-v29-bundle/workflow_scripts/step_09.sh"
+    - name: Save fonts now, even if later flash fitting fails
+      uses: actions/cache/save@v4
+      if: steps.font_cache.outputs.cache-hit != 'true'
+      continue-on-error: true
+      with:
+        path: |-
+          radpro/platform.io/src/ui/fonts
+          radpro/.rider-fonts.sha256
+        key: rider-full-fonts-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.keys.outputs.font }}
+    - name: Restore ARM compiler and PlatformIO platform packages
+      uses: actions/cache/restore@v4
+      id: pio_cache
+      continue-on-error: true
+      with:
+        path: |-
+          ~/.platformio/packages
+          ~/.platformio/platforms
+        key: rider-pio-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.keys.outputs.pio }}
+        restore-keys: |
+          rider-pio-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.keys.outputs.pio }}
+          rider-pio-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.keys.outputs.old_pio }}
+    - name: FIRST GATE - require 75 KiB fit, 300 B flash reserve and improved RAM
+      shell: bash
+      run: bash --noprofile --norc -e -o pipefail "$RUNNER_TEMP/rider-v29-bundle/workflow_scripts/step_12.sh"
+      id: compile
+    - name: Check whether ARM dependencies completed a usable compilation
+      shell: bash
+      id: cacheable
+      if: ${{ !cancelled() && steps.pio_cache.outputs.cache-hit != 'true' && (steps.compile.outcome == 'success' || steps.compile.outcome == 'failure') }}
