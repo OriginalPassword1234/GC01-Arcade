@@ -1,4 +1,4 @@
-name: GC01 Rider v2.8 - adaptive minute history and integrity audit
+name: GC01 Rider v2.9 - adaptive minute history and integrity audit
 permissions:
   contents: read
 jobs:
